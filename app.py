@@ -108,6 +108,21 @@ QPlainTextEdit { border: 1px solid #d1d5db; border-radius: 6px; background: #fff
 QMenu { background: #ffffff; border: 1px solid #e5e7eb; padding: 6px; }
 QMenu::item { padding: 6px 18px; border-radius: 4px; }
 QMenu::item:selected { background: #eff6ff; color: #1d4ed8; }
+QComboBox {
+    background: #ffffff; color: #111827; border: 1px solid #d1d5db; border-radius: 6px;
+    padding: 4px 6px; min-height: 20px;
+}
+QComboBox:focus, QComboBox:on { border-color: #2563eb; }
+QComboBox QAbstractItemView {
+    background: #ffffff; color: #111827; border: 1px solid #e5e7eb; outline: 0; padding: 2px;
+    selection-background-color: #eff6ff; selection-color: #1d4ed8;
+}
+QComboBox QAbstractItemView::item { min-height: 26px; padding: 0 8px; color: #111827; background: #ffffff; }
+QComboBox QAbstractItemView::item:hover, QComboBox QAbstractItemView::item:selected {
+    background: #eff6ff; color: #1d4ed8;
+}
+QPushButton#Stop { background: #fef2f2; color: #b91c1c; border-color: #fca5a5; font-weight: 600; }
+QPushButton#Stop:hover { background: #fee2e2; border-color: #f87171; }
 """
 
 
@@ -485,6 +500,14 @@ class TextEditDialog(QDialog):
         return self.edit.toPlainText()
 
 
+def make_combo():
+    """下拉框默认的列表委托不认样式表里的 ::item 规则，鼠标悬停时会画成一片白色，
+    换成 QStyledItemDelegate 后才能按样式表显示悬停/选中效果。"""
+    cb = QComboBox()
+    cb.setItemDelegate(QStyledItemDelegate(cb))
+    return cb
+
+
 def load_llm_cfg(settings, pid=None):
     """读取某个接口（默认当前选中的接口）保存的配置。"""
     pid = pid or settings.value("llm/provider", "openai")
@@ -518,10 +541,12 @@ class LLMSettingsDialog(QDialog):
         self.settings = settings
         self.setWindowTitle("大模型识别接口")
         self.setMinimumWidth(560)
+        # 全局样式里的 QLineEdit 是给书签编辑框用的（常亮蓝框），这里改回普通输入框
         self.setStyleSheet(
-            "QLineEdit, QComboBox { border: 1px solid #d1d5db; border-radius: 6px; padding: 4px 6px;"
+            "QLineEdit { border: 1px solid #d1d5db; border-radius: 6px; padding: 4px 6px;"
             " background: #ffffff; min-height: 20px; }"
-            "QLineEdit:focus, QComboBox:focus { border-color: #2563eb; }")
+            "QLineEdit:focus { border-color: #2563eb; }"
+            "QComboBox QLineEdit { border: none; padding: 0; min-height: 0; }")
         lay = QVBoxLayout(self)
         tip = QLabel("选择“大模型”识别引擎时，目录页图片会发送到下面的接口，由视觉大模型读出标题、页码和层级；"
                      "查找目录页、推算页码偏移仍在本机完成。调用失败时自动改用本地 OCR 结果。")
@@ -532,10 +557,10 @@ class LLMSettingsDialog(QDialog):
         g = QGridLayout()
         g.setHorizontalSpacing(10)
         g.setVerticalSpacing(10)
-        self.cb_provider = QComboBox()
+        self.cb_provider = make_combo()
         for pid, name, *_ in llm.PROVIDERS:
             self.cb_provider.addItem(name, pid)
-        self.cb_protocol = QComboBox()
+        self.cb_protocol = make_combo()
         for proto, name in llm.PROTOCOLS:
             self.cb_protocol.addItem(name, proto)
         self.ed_base = QLineEdit()
@@ -546,7 +571,7 @@ class LLMSettingsDialog(QDialog):
         self.cb_show = QCheckBox("显示")
         self.cb_show.toggled.connect(
             lambda on: self.ed_key.setEchoMode(QLineEdit.Normal if on else QLineEdit.Password))
-        self.cb_model = QComboBox()
+        self.cb_model = make_combo()
         self.cb_model.setEditable(True)
         self.cb_model.lineEdit().setPlaceholderText("需支持图片输入的模型")
         key_row = QHBoxLayout()
@@ -668,6 +693,7 @@ class MainWindow(QMainWindow):
         self.thread = None
         self.worker = None
         self._on_done = None
+        self._task_fn = None
         self._updating = False
         self.undo_stack, self.redo_stack = [], []
         self._last_snap = []
@@ -715,7 +741,7 @@ class MainWindow(QMainWindow):
         self.btn_open.clicked.connect(self.choose_file)
         self.btn_detect = QPushButton("重新识别")
         self.btn_detect.setToolTip("按右侧设置重新识别目录")
-        self.btn_detect.clicked.connect(self.start_recognize)
+        self.btn_detect.clicked.connect(self._detect_clicked)
 
         # 识别设置
         self.btn_opts = QToolButton()
@@ -741,7 +767,7 @@ class MainWindow(QMainWindow):
         self.cb_ocr = QCheckBox("强制使用 OCR（文字层是乱码时勾选）")
         g.addWidget(self.cb_ocr, 1, 0, 1, 4)
         g.addWidget(QLabel("识别引擎"), 2, 0)
-        self.cb_engine = QComboBox()
+        self.cb_engine = make_combo()
         self.cb_engine.addItem("本地识别（默认）", "local")
         self.cb_engine.addItem("大模型识别", "llm")
         self.cb_engine.setCurrentIndex(max(0, self.cb_engine.findData(self.settings.value("ocr/engine", "local"))))
@@ -974,13 +1000,21 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- 状态
     def _set_doc_loaded(self, on):
         self.stack.setCurrentIndex(1 if on else 0)
-        for w in (self.btn_detect, self.btn_opts, self.btn_view, self.btn_export):
+        # “识别设置”不依赖已打开的文件，始终可用
+        for w in (self.btn_detect, self.btn_view, self.btn_export):
             w.setEnabled(on)
 
     def _set_busy(self, busy, text=""):
-        for w in [self.btn_open, self.btn_detect, self.btn_opts, self.btn_view, self.btn_export,
+        for w in [self.btn_open, self.btn_view, self.btn_export,
                   self.sp_offset, self.btn_off_minus, self.btn_off_plus, self.tree] + [b for b in self.tool_buttons if b is not None]:
             w.setEnabled(not busy)
+        # 后台任务运行时，“重新识别”按钮变成“终止”按钮
+        self.btn_detect.setText(("■ 终止识别" if self._task_fn is core.recognize else "■ 终止") if busy else "重新识别")
+        self.btn_detect.setToolTip("终止当前任务" if busy else "按右侧设置重新识别目录")
+        self.btn_detect.setObjectName("Stop" if busy else "")
+        self.btn_detect.style().unpolish(self.btn_detect)
+        self.btn_detect.style().polish(self.btn_detect)
+        self.btn_detect.setEnabled(busy or self.doc is not None)
         self.progress.setVisible(busy)
         self.btn_cancel.setVisible(busy)
         if busy:
@@ -998,6 +1032,7 @@ class MainWindow(QMainWindow):
         if self.thread is not None:
             return False
         self._on_done = on_done
+        self._task_fn = fn
         self.thread = QThread(self)
         self.worker = Worker(fn, *args, **kw)
         self.worker.moveToThread(self.thread)
@@ -1041,6 +1076,12 @@ class MainWindow(QMainWindow):
             self.thread.deleteLater()
         self.worker = None
         self.thread = None
+
+    def _detect_clicked(self):
+        if self.thread is not None:
+            self.cancel_task()
+        else:
+            self.start_recognize()
 
     def cancel_task(self):
         if self.worker is not None:

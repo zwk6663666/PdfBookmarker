@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 虚拟环境
+.venv/
+.venv-*/
+venv/
+env/
+
+# PyInstaller 打包输出（PdfBookmarker.spec 需要保留）
+build/
+dist/
+
+# 编辑器 / IDE
+.vscode/
+.idea/
+*.swp
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 临时文件
+*.log
+*.tmp

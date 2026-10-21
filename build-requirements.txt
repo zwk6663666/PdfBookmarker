@@ -1,0 +1,14 @@
+# 打包专用的精简依赖，和日常运行用的 requirements.txt 分开，
+# 避免把用不到的大型库打进 exe。rapidocr_onnxruntime 会另外用 --no-deps 安装，
+# 以免它把带图形界面的完整版 OpenCV 装进来。
+PyMuPDF>=1.24,<2
+PySide6-Essentials>=6.5
+numpy
+onnxruntime
+opencv-python-headless>=4.8,<4.12
+pyclipper
+shapely
+pillow
+pyyaml
+six
+pyinstaller>=6.22

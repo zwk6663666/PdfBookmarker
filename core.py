@@ -23,6 +23,8 @@ import sys as _sys
 _sys.modules.setdefault("pymupdf.layout", None)
 import pymupdf
 
+import llm
+
 # MuPDF 不是线程安全的，所有 pymupdf 调用都要经过这把锁
 FITZ_LOCK = threading.RLock()
 
@@ -928,6 +930,46 @@ def add_toc_entry(entries, reader, toc_pages, offset):
     entries.insert(pos, new)
 
 
+def render_jpeg(page, max_side=2000):
+    """把页面渲染成 JPEG，长边不超过 max_side 像素，用于发送给大模型。"""
+    with FITZ_LOCK:
+        r = page.rect
+        zoom = min(2.5, max_side / max(r.width, r.height, 1))
+        pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), colorspace=pymupdf.csRGB, alpha=False)
+        return pix.tobytes("jpeg", jpg_quality=85)
+
+
+def llm_entries(doc, reader, toc_pages, cfg, progress):
+    """用视觉大模型读取目录页，返回与 parse_entries 相同格式的条目列表。"""
+    imgs = [(p, render_jpeg(doc[p])) for p in toc_pages]
+    items = llm.read_toc(imgs, cfg, check=reader.check,
+                         progress=lambda i, n: progress(50 + int(10 * i / n), "正在用大模型读取目录"))
+    entries = []
+    prev = 0
+    for pno, title, page, level in items:
+        title = clean_title(title)
+        if not title or is_heading(title):
+            continue
+        page = page.translate(FULLWIDTH).strip()
+        book, roman = None, False
+        if re.fullmatch(r"\d{1,4}", page):
+            book = int(page)
+        elif roman_to_int(page) is not None:
+            book, roman = roman_to_int(page), True
+        level = max(1, min(level, prev + 1))
+        prev = level
+        entries.append(Entry(title, level=level, book=book, roman=roman, src_page=pno))
+    # 没有页码的条目，沿用后面第一个有页码条目的页码（与 parse_entries 一致）
+    nxt = None
+    for e in reversed(entries):
+        if e.book is not None:
+            nxt = e.book
+        elif nxt is not None:
+            e.book = nxt
+            e.status = "guess"
+    return [e for e in entries if e.book is not None]
+
+
 def open_doc(path, password=None):
     with FITZ_LOCK:
         doc = pymupdf.open(path)
@@ -939,7 +981,8 @@ def open_doc(path, password=None):
 
 def recognize(path, force_ocr=False, toc_range=None, verify=True,
               progress: Callable[[int, str], None] = None, cancel=None, doc=None,
-              password=None) -> Result:
+              password=None, llm_cfg=None) -> Result:
+    """llm_cfg 为大模型接口配置（protocol/base/key/model）；为 None 时完全使用本地识别。"""
     progress = progress or (lambda *a: None)
     own = doc is None
     if own:
@@ -958,10 +1001,23 @@ def recognize(path, force_ocr=False, toc_range=None, verify=True,
 
         modes = {reader.page_mode(p) for p in toc_pages}
         mode = "ocr" if modes == {"ocr"} else ("text" if modes == {"text"} else "mixed")
-        for i, p in enumerate(toc_pages):
-            progress(50 + int(10 * i / len(toc_pages)), f"正在解析目录第 {p + 1} 页")
-            refine_ocr_page(doc, reader, p)
-        entries = parse_entries(doc, reader, toc_pages)
+        entries = None
+        if llm_cfg:
+            try:
+                entries = llm_entries(doc, reader, toc_pages, llm_cfg, progress) or None
+                if entries:
+                    msgs.append("目录内容由大模型识别。")
+                else:
+                    msgs.append("大模型没有识别出目录条目，已改用本地识别结果。")
+            except Cancelled:
+                raise
+            except Exception as e:
+                msgs.append(f"大模型识别失败，已改用本地识别结果（{e}）")
+        if entries is None:
+            for i, p in enumerate(toc_pages):
+                progress(50 + int(10 * i / len(toc_pages)), f"正在解析目录第 {p + 1} 页")
+                refine_ocr_page(doc, reader, p)
+            entries = parse_entries(doc, reader, toc_pages)
         if not entries:
             return Result([], 0, toc_pages, mode, "", ["目录页上没有解析出条目。可尝试勾选“强制 OCR”后重新识别。"])
 

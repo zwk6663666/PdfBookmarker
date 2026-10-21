@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import html
 import os
 import re
 import sys
@@ -27,9 +28,10 @@ from PySide6.QtWidgets import (
     QCheckBox, QHBoxLayout, QVBoxLayout, QSplitter, QTreeWidget, QTreeWidgetItem,
     QStyledItemDelegate, QLineEdit, QAbstractItemView, QHeaderView, QScrollArea, QStackedWidget,
     QFileDialog, QMessageBox, QProgressBar, QDialog, QPlainTextEdit, QDialogButtonBox,
-    QInputDialog, QSizePolicy, QMenu, QWidgetAction, QGridLayout)
+    QInputDialog, QSizePolicy, QMenu, QWidgetAction, QGridLayout, QComboBox)
 
 import core
+import llm
 
 APP_NAME = "PDF 目录书签助手"
 APP_VERSION = "1.0"
@@ -483,6 +485,170 @@ class TextEditDialog(QDialog):
         return self.edit.toPlainText()
 
 
+def load_llm_cfg(settings, pid=None):
+    """读取某个接口（默认当前选中的接口）保存的配置。"""
+    pid = pid or settings.value("llm/provider", "openai")
+    if pid not in llm.PROVIDER_MAP:
+        pid = "openai"
+    _, _, proto, base, models, _ = llm.PROVIDER_MAP[pid]
+    g = f"llm/{pid}/"
+    return dict(provider=pid,
+                protocol=settings.value(g + "protocol", proto) if pid == "custom" else proto,
+                base=settings.value(g + "base", base),
+                key=settings.value(g + "key", ""),
+                model=settings.value(g + "model", models[0] if models else ""))
+
+
+def llm_cfg_problem(cfg):
+    """配置不完整时返回原因，否则返回空字符串。"""
+    if not (cfg.get("base") or "").strip():
+        return "没有填写接口地址"
+    if not (cfg.get("model") or "").strip():
+        return "没有填写模型名称"
+    if llm.PROVIDER_MAP[cfg["provider"]][5] and not (cfg.get("key") or "").strip():
+        return "没有填写 API 密钥"
+    return ""
+
+
+class LLMSettingsDialog(QDialog):
+    tested = Signal(bool, str)
+
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self.settings = settings
+        self.setWindowTitle("大模型识别接口")
+        self.setMinimumWidth(560)
+        self.setStyleSheet(
+            "QLineEdit, QComboBox { border: 1px solid #d1d5db; border-radius: 6px; padding: 4px 6px;"
+            " background: #ffffff; min-height: 20px; }"
+            "QLineEdit:focus, QComboBox:focus { border-color: #2563eb; }")
+        lay = QVBoxLayout(self)
+        tip = QLabel("选择“大模型”识别引擎时，目录页图片会发送到下面的接口，由视觉大模型读出标题、页码和层级；"
+                     "查找目录页、推算页码偏移仍在本机完成。调用失败时自动改用本地 OCR 结果。")
+        tip.setWordWrap(True)
+        tip.setObjectName("Muted")
+        lay.addWidget(tip)
+
+        g = QGridLayout()
+        g.setHorizontalSpacing(10)
+        g.setVerticalSpacing(10)
+        self.cb_provider = QComboBox()
+        for pid, name, *_ in llm.PROVIDERS:
+            self.cb_provider.addItem(name, pid)
+        self.cb_protocol = QComboBox()
+        for proto, name in llm.PROTOCOLS:
+            self.cb_protocol.addItem(name, proto)
+        self.ed_base = QLineEdit()
+        self.ed_base.setPlaceholderText("例如 https://api.openai.com/v1")
+        self.ed_key = QLineEdit()
+        self.ed_key.setEchoMode(QLineEdit.Password)
+        self.ed_key.setPlaceholderText("sk-…")
+        self.cb_show = QCheckBox("显示")
+        self.cb_show.toggled.connect(
+            lambda on: self.ed_key.setEchoMode(QLineEdit.Normal if on else QLineEdit.Password))
+        self.cb_model = QComboBox()
+        self.cb_model.setEditable(True)
+        self.cb_model.lineEdit().setPlaceholderText("需支持图片输入的模型")
+        key_row = QHBoxLayout()
+        key_row.addWidget(self.ed_key, 1)
+        key_row.addWidget(self.cb_show)
+        rows = [("接口", self.cb_provider), ("协议", self.cb_protocol), ("接口地址", self.ed_base),
+                ("API 密钥", key_row), ("模型", self.cb_model)]
+        for r, (label, w) in enumerate(rows):
+            g.addWidget(QLabel(label), r, 0)
+            if isinstance(w, QHBoxLayout):
+                g.addLayout(w, r, 1)
+            else:
+                g.addWidget(w, r, 1)
+        g.setColumnStretch(1, 1)
+        lay.addLayout(g)
+        note = QLabel("密钥只保存在本机的程序设置中。模型名可从下拉中选择，也可以直接输入。")
+        note.setObjectName("Muted")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+
+        self.lbl_test = QLabel("")
+        self.lbl_test.setWordWrap(True)
+        self.btn_test = QPushButton("测试连接")
+        self.btn_test.clicked.connect(self.run_test)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("保存")
+        bb.button(QDialogButtonBox.Ok).setObjectName("Primary")
+        bb.button(QDialogButtonBox.Cancel).setText("取消")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        bottom = QHBoxLayout()
+        bottom.addWidget(self.btn_test)
+        bottom.addWidget(self.lbl_test, 1)
+        bottom.addWidget(bb)
+        lay.addLayout(bottom)
+
+        # 切换接口时各自的配置分别保存，切回来不丢失
+        self._cfgs = {}
+        self._pid = None
+        self.tested.connect(self._test_done)
+        self.cb_provider.currentIndexChanged.connect(self._provider_changed)
+        cur = load_llm_cfg(settings)["provider"]
+        self.cb_provider.setCurrentIndex(max(0, self.cb_provider.findData(cur)))
+        self._provider_changed()
+
+    def _form_cfg(self):
+        return dict(provider=self._pid, protocol=self.cb_protocol.currentData(),
+                    base=self.ed_base.text().strip(), key=self.ed_key.text().strip(),
+                    model=self.cb_model.currentText().strip())
+
+    def _provider_changed(self):
+        if self._pid is not None:
+            self._cfgs[self._pid] = self._form_cfg()
+        pid = self.cb_provider.currentData()
+        self._pid = pid
+        cfg = self._cfgs.get(pid) or load_llm_cfg(self.settings, pid)
+        models = llm.PROVIDER_MAP[pid][4]
+        self.cb_protocol.setCurrentIndex(max(0, self.cb_protocol.findData(cfg["protocol"])))
+        self.cb_protocol.setEnabled(pid == "custom")
+        self.ed_base.setText(cfg["base"])
+        self.ed_key.setText(cfg["key"])
+        self.ed_key.setPlaceholderText("sk-…" if llm.PROVIDER_MAP[pid][5] else "本机服务一般不需要密钥")
+        self.cb_model.clear()
+        self.cb_model.addItems(models)
+        self.cb_model.setCurrentText(cfg["model"])
+        self.lbl_test.clear()
+
+    def run_test(self):
+        cfg = self._form_cfg()
+        why = llm_cfg_problem(cfg)
+        if why:
+            self.lbl_test.setText(f"<span style='color:#dc2626'>{why}</span>")
+            return
+        self.btn_test.setEnabled(False)
+        self.lbl_test.setText("正在连接…")
+
+        def work():
+            try:
+                self.tested.emit(True, llm.test(cfg))
+            except Exception as e:  # noqa
+                self.tested.emit(False, str(e))
+        threading.Thread(target=work, daemon=True).start()
+
+    @Slot(bool, str)
+    def _test_done(self, ok, msg):
+        self.btn_test.setEnabled(True)
+        color = "#15803d" if ok else "#dc2626"
+        text = f"连接成功，模型回复：{msg}" if ok else msg
+        self.lbl_test.setText(f"<span style='color:{color}'>{html.escape(text)}</span>")
+
+    def accept(self):
+        self._cfgs[self._pid] = self._form_cfg()
+        for pid, cfg in self._cfgs.items():
+            g = f"llm/{pid}/"
+            for k in ("base", "key", "model"):
+                self.settings.setValue(g + k, cfg[k])
+            if pid == "custom":
+                self.settings.setValue(g + "protocol", cfg["protocol"])
+        self.settings.setValue("llm/provider", self._pid)
+        super().accept()
+
+
 # ----------------------------------------------------------------------------
 # 主窗口
 # ----------------------------------------------------------------------------
@@ -574,9 +740,23 @@ class MainWindow(QMainWindow):
         g.addWidget(self.sp_toc_b, 0, 3)
         self.cb_ocr = QCheckBox("强制使用 OCR（文字层是乱码时勾选）")
         g.addWidget(self.cb_ocr, 1, 0, 1, 4)
+        g.addWidget(QLabel("识别引擎"), 2, 0)
+        self.cb_engine = QComboBox()
+        self.cb_engine.addItem("本地识别（默认）", "local")
+        self.cb_engine.addItem("大模型识别", "llm")
+        self.cb_engine.setCurrentIndex(max(0, self.cb_engine.findData(self.settings.value("ocr/engine", "local"))))
+        self.cb_engine.currentIndexChanged.connect(self._engine_changed)
+        g.addWidget(self.cb_engine, 2, 1, 1, 2)
+        btn_llm = QPushButton("接口设置…")
+        btn_llm.clicked.connect(lambda: (menu.hide(), self.edit_llm_settings()))
+        g.addWidget(btn_llm, 2, 3)
+        self.lbl_engine = QLabel()
+        self.lbl_engine.setObjectName("Muted")
+        g.addWidget(self.lbl_engine, 3, 0, 1, 4)
         hint = QLabel("目录页范围填 PDF 页码，两项都为“自动”时由程序查找。")
         hint.setObjectName("Muted")
-        g.addWidget(hint, 2, 0, 1, 4)
+        g.addWidget(hint, 4, 0, 1, 4)
+        self._update_engine_label()
         wa = QWidgetAction(menu)
         wa.setDefaultWidget(box)
         menu.addAction(wa)
@@ -940,8 +1120,43 @@ class MainWindow(QMainWindow):
             a = a or b
             b = b or a
             rng = (min(a, b), max(a, b))
+        llm_cfg = None
+        if self.cb_engine.currentData() == "llm":
+            llm_cfg = load_llm_cfg(self.settings)
+            why = llm_cfg_problem(llm_cfg)
+            if why:
+                r = QMessageBox.question(self, APP_NAME, f"大模型接口尚未配置好（{why}）。\n\n"
+                                         "是否现在设置？选“否”则本次使用本地识别。")
+                if r == QMessageBox.Yes:
+                    if not self.edit_llm_settings():
+                        return
+                    llm_cfg = load_llm_cfg(self.settings)
+                if r != QMessageBox.Yes or llm_cfg_problem(llm_cfg):
+                    llm_cfg = None
         self.run_task(core.recognize, self.path, force_ocr=self.cb_ocr.isChecked(), toc_range=rng,
-                      password=self.password, on_done=self._recognized, text="正在识别目录…")
+                      password=self.password, llm_cfg=llm_cfg, on_done=self._recognized,
+                      text="正在用大模型识别目录…" if llm_cfg else "正在识别目录…")
+
+    def _engine_changed(self):
+        self.settings.setValue("ocr/engine", self.cb_engine.currentData())
+        self._update_engine_label()
+
+    def _update_engine_label(self):
+        if self.cb_engine.currentData() != "llm":
+            self.lbl_engine.setText("使用本机 OCR / 文字层解析目录，无需联网。")
+            return
+        cfg = load_llm_cfg(self.settings)
+        name = llm.PROVIDER_MAP[cfg["provider"]][1]
+        why = llm_cfg_problem(cfg)
+        self.lbl_engine.setText(f"{name} · {cfg['model'] or '未设置模型'}" + (f"（{why}）" if why else ""))
+
+    def edit_llm_settings(self):
+        dlg = LLMSettingsDialog(self.settings, self)
+        if dlg.exec() != QDialog.Accepted:
+            return False
+        self._update_engine_label()
+        self.status("已保存大模型接口设置")
+        return True
 
     def _recognized(self, res: core.Result):
         self.mode = res.mode

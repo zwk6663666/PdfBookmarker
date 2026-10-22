@@ -78,6 +78,7 @@ QSpinBox {
     background: #ffffff; border: 1px solid #d1d5db; border-radius: 6px; padding: 3px 6px; min-height: 20px;
 }
 QSpinBox::up-button, QSpinBox::down-button { width: 0px; border: none; }
+QSpinBox:disabled { color: #9ca3af; background: #f3f4f6; border-color: #e5e7eb; }
 QToolButton#Step { border: 1px solid #d1d5db; background: #ffffff; min-width: 22px; max-width: 22px; padding: 2px 0; font-weight: 600; }
 QToolButton#Step:hover { background: #f3f4f6; }
 QSpinBox:focus, QLineEdit:focus { border-color: #2563eb; }
@@ -161,6 +162,19 @@ def make_app_icon() -> QIcon:
     for sz in (16, 24, 32, 48, 64, 128, 256):
         icon.addPixmap(_paint_icon(sz))
     return icon
+
+
+def stop_icon() -> QIcon:
+    """“终止”按钮上的红色方块。直接画出来，不依赖字体里是否有 ■ 字符。"""
+    pm = QPixmap(32, 32)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor("#b91c1c"))
+    p.drawRoundedRect(QRectF(7, 7, 18, 18), 3, 3)
+    p.end()
+    return QIcon(pm)
 
 
 def open_with_system(path):
@@ -774,7 +788,7 @@ class MainWindow(QMainWindow):
         menu.addAction(wa)
         self.btn_opts.setMenu(menu)
 
-        # 目录页范围：勾选“自动识别”时由程序查找；手动改动页码后自动取消勾选
+        # 目录页范围：勾选“自动识别”时由程序查找，输入框不可编辑；取消勾选后按填写的范围识别
         toc = QWidget()
         th = QHBoxLayout(toc)
         th.setContentsMargins(0, 0, 0, 0)
@@ -787,11 +801,12 @@ class MainWindow(QMainWindow):
             sp.setSpecialValueText("–")
             sp.setFixedWidth(64)
             sp.setAlignment(Qt.AlignCenter)
-            sp.setToolTip("目录所在的 PDF 页码范围")
-            sp.valueChanged.connect(self._toc_range_edited)
+            sp.setToolTip("目录所在的 PDF 页码范围（取消勾选“自动识别”后可填写）")
+            sp.setEnabled(False)
         self.cb_toc_auto = QCheckBox("自动识别")
         self.cb_toc_auto.setChecked(True)
-        self.cb_toc_auto.setToolTip("勾选时由程序查找目录页；修改页码后自动取消勾选，按填写的范围识别")
+        self.cb_toc_auto.setToolTip("勾选时由程序查找目录页；取消勾选后可手动填写目录页范围")
+        self.cb_toc_auto.toggled.connect(self._toc_auto_toggled)
         th.addWidget(self.sp_toc_a)
         th.addWidget(QLabel("至"))
         th.addWidget(self.sp_toc_b)
@@ -1020,7 +1035,8 @@ class MainWindow(QMainWindow):
                   self.sp_offset, self.btn_off_minus, self.btn_off_plus, self.tree] + [b for b in self.tool_buttons if b is not None]:
             w.setEnabled(not busy)
         # 后台任务运行时，“重新识别”按钮变成“终止”按钮
-        self.btn_detect.setText(("■ 终止识别" if self._task_fn is core.recognize else "■ 终止") if busy else "重新识别")
+        self.btn_detect.setText(("终止识别" if self._task_fn is core.recognize else "终止") if busy else "重新识别")
+        self.btn_detect.setIcon(stop_icon() if busy else QIcon())
         self.btn_detect.setToolTip("终止当前任务" if busy else "按右侧设置重新识别目录")
         self.btn_detect.setObjectName("Stop" if busy else "")
         self.btn_detect.style().unpolish(self.btn_detect)
@@ -1196,8 +1212,12 @@ class MainWindow(QMainWindow):
             sp.setValue(v)
             sp.blockSignals(False)
 
-    def _toc_range_edited(self):
-        self.cb_toc_auto.setChecked(False)
+    def _toc_auto_toggled(self, on):
+        for sp in (self.sp_toc_a, self.sp_toc_b):
+            sp.setEnabled(not on)
+        if not on:
+            self.sp_toc_a.setFocus()
+            self.sp_toc_a.selectAll()
 
     def _engine_changed(self):
         self.settings.setValue("ocr/engine", self.cb_engine.currentData())

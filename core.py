@@ -997,7 +997,7 @@ def recognize(path, force_ocr=False, toc_range=None, verify=True,
         else:
             toc_pages = find_toc_pages(doc, reader, progress)
         if not toc_pages:
-            return Result([], 0, [], "text", "", ["没有找到目录页。可以在顶栏“目录页”处手动填写页码范围后重新识别。"])
+            return Result([], 0, [], "text", "", ["没有找到目录页。可以取消勾选顶栏的“自动识别”，手动填写目录页范围后重新识别。"])
 
         modes = {reader.page_mode(p) for p in toc_pages}
         mode = "ocr" if modes == {"ocr"} else ("text" if modes == {"text"} else "mixed")

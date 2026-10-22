@@ -753,17 +753,6 @@ class MainWindow(QMainWindow):
         g.setContentsMargins(12, 10, 12, 10)
         g.setHorizontalSpacing(8)
         g.setVerticalSpacing(10)
-        g.addWidget(QLabel("目录页范围"), 0, 0)
-        self.sp_toc_a = QSpinBox()
-        self.sp_toc_b = QSpinBox()
-        for sp in (self.sp_toc_a, self.sp_toc_b):
-            sp.setRange(0, 99999)
-            sp.setSpecialValueText("自动")
-            sp.setFixedWidth(80)
-            sp.setAlignment(Qt.AlignCenter)
-        g.addWidget(self.sp_toc_a, 0, 1)
-        g.addWidget(QLabel("至"), 0, 2)
-        g.addWidget(self.sp_toc_b, 0, 3)
         self.cb_ocr = QCheckBox("强制使用 OCR（文字层是乱码时勾选）")
         g.addWidget(self.cb_ocr, 1, 0, 1, 4)
         g.addWidget(QLabel("识别引擎"), 2, 0)
@@ -779,14 +768,34 @@ class MainWindow(QMainWindow):
         self.lbl_engine = QLabel()
         self.lbl_engine.setObjectName("Muted")
         g.addWidget(self.lbl_engine, 3, 0, 1, 4)
-        hint = QLabel("目录页范围填 PDF 页码，两项都为“自动”时由程序查找。")
-        hint.setObjectName("Muted")
-        g.addWidget(hint, 4, 0, 1, 4)
         self._update_engine_label()
         wa = QWidgetAction(menu)
         wa.setDefaultWidget(box)
         menu.addAction(wa)
         self.btn_opts.setMenu(menu)
+
+        # 目录页范围：勾选“自动识别”时由程序查找；手动改动页码后自动取消勾选
+        toc = QWidget()
+        th = QHBoxLayout(toc)
+        th.setContentsMargins(0, 0, 0, 0)
+        th.setSpacing(6)
+        th.addWidget(QLabel("目录页"))
+        self.sp_toc_a = QSpinBox()
+        self.sp_toc_b = QSpinBox()
+        for sp in (self.sp_toc_a, self.sp_toc_b):
+            sp.setRange(0, 99999)
+            sp.setSpecialValueText("–")
+            sp.setFixedWidth(64)
+            sp.setAlignment(Qt.AlignCenter)
+            sp.setToolTip("目录所在的 PDF 页码范围")
+            sp.valueChanged.connect(self._toc_range_edited)
+        self.cb_toc_auto = QCheckBox("自动识别")
+        self.cb_toc_auto.setChecked(True)
+        self.cb_toc_auto.setToolTip("勾选时由程序查找目录页；修改页码后自动取消勾选，按填写的范围识别")
+        th.addWidget(self.sp_toc_a)
+        th.addWidget(QLabel("至"))
+        th.addWidget(self.sp_toc_b)
+        th.addWidget(self.cb_toc_auto)
 
         self.info = QLabel("", objectName="Info")
         self.info.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
@@ -804,6 +813,8 @@ class MainWindow(QMainWindow):
         h.addWidget(self.btn_open)
         h.addWidget(self.btn_detect)
         h.addWidget(self.btn_opts)
+        h.addSpacing(6)
+        h.addWidget(toc)
         h.addWidget(sep)
         h.addWidget(self.info, 1)
         h.addWidget(self.btn_view)
@@ -1128,8 +1139,8 @@ class MainWindow(QMainWindow):
         self.sp_page.setRange(1, len(doc))
         self.lbl_total.setText(f"/ {len(doc)}")
         self._page_changed(0)
-        self.sp_toc_a.setValue(0)
-        self.sp_toc_b.setValue(0)
+        self._set_toc_range(0, 0)
+        self.cb_toc_auto.setChecked(True)
         self.tree.clear()
         self.undo_stack.clear()
         self.redo_stack.clear()
@@ -1157,7 +1168,7 @@ class MainWindow(QMainWindow):
             return
         a, b = self.sp_toc_a.value(), self.sp_toc_b.value()
         rng = None
-        if a or b:
+        if not self.cb_toc_auto.isChecked() and (a or b):
             a = a or b
             b = b or a
             rng = (min(a, b), max(a, b))
@@ -1177,6 +1188,16 @@ class MainWindow(QMainWindow):
         self.run_task(core.recognize, self.path, force_ocr=self.cb_ocr.isChecked(), toc_range=rng,
                       password=self.password, llm_cfg=llm_cfg, on_done=self._recognized,
                       text="正在用大模型识别目录…" if llm_cfg else "正在识别目录…")
+
+    def _set_toc_range(self, a, b):
+        """程序回填识别到的目录页范围，不影响“自动识别”的勾选状态。"""
+        for sp, v in ((self.sp_toc_a, a), (self.sp_toc_b, b)):
+            sp.blockSignals(True)
+            sp.setValue(v)
+            sp.blockSignals(False)
+
+    def _toc_range_edited(self):
+        self.cb_toc_auto.setChecked(False)
 
     def _engine_changed(self):
         self.settings.setValue("ocr/engine", self.cb_engine.currentData())
@@ -1221,8 +1242,7 @@ class MainWindow(QMainWindow):
         pages = f"第 {tp[0] + 1} 页" if len(tp) == 1 else f"第 {tp[0] + 1}–{tp[-1] + 1} 页"
         self.info.setText(f"{os.path.basename(self.path)} · {len(self.doc)} 页 · {mode} · 目录在 {pages}"
                           f" · 偏移 {res.offset:+d}（依据{res.offset_method}）")
-        self.sp_toc_a.setValue(tp[0] + 1)
-        self.sp_toc_b.setValue(tp[-1] + 1)
+        self._set_toc_range(tp[0] + 1, tp[-1] + 1)
         extra = " ".join(res.messages)
         tip = "" if res.mode == "text" else "  扫描版可在“更多”里选择“核对页码”逐条确认。"
         self.status(f"识别到 {len(res.entries)} 条目录。{extra}{tip}")

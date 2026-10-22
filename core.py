@@ -997,7 +997,7 @@ def recognize(path, force_ocr=False, toc_range=None, verify=True,
         else:
             toc_pages = find_toc_pages(doc, reader, progress)
         if not toc_pages:
-            return Result([], 0, [], "text", "", ["没有找到目录页。可以在“目录页”里手动指定页码范围后重新识别。"])
+            return Result([], 0, [], "text", "", ["没有找到目录页。可以在顶栏“目录页”处手动填写页码范围后重新识别。"])
 
         modes = {reader.page_mode(p) for p in toc_pages}
         mode = "ocr" if modes == {"ocr"} else ("text" if modes == {"text"} else "mixed")
@@ -1019,7 +1019,7 @@ def recognize(path, force_ocr=False, toc_range=None, verify=True,
                 refine_ocr_page(doc, reader, p)
             entries = parse_entries(doc, reader, toc_pages)
         if not entries:
-            return Result([], 0, toc_pages, mode, "", ["目录页上没有解析出条目。可尝试勾选“强制 OCR”后重新识别。"])
+            return Result([], 0, toc_pages, mode, "", ["目录页上没有解析出条目。可尝试在“识别设置”里勾选“强制使用 OCR”，或手动调整目录页范围后重新识别。"])
 
         start = toc_pages[-1] + 1
         offset = offset_from_page_numbers(doc, reader, start, progress, 60, 15)

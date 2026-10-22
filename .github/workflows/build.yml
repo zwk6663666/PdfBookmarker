@@ -1,0 +1,146 @@
+# 云端打包 Windows 版
+#
+# - 推送 v 开头的 tag（如 v1.2.0）：自动打包两种版本，并发布到 GitHub Releases。
+#   tag 名中带“-”（如 v1.2.0-beta）时标记为预发布。
+# - 手动运行（Actions › 打包 › Run workflow）：只打包，结果作为本次运行的附件
+#   （Artifacts）供下载，不会发布 Release。
+#
+# 打包步骤与“打包为exe.bat”一致：精简依赖、RapidOCR 不带依赖安装、
+# 用 PdfBookmarker.spec 分别打出文件夹版和单文件版。
+name: 打包
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 打包方式
+        type: choice
+        options:
+          - both
+          - onedir
+          - onefile
+        default: both
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: 打包 Windows 版
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PYTHONUTF8: "1"
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # python.org 的构建自带 Tcl/Tk，单文件版可以带启动画面
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: build-requirements.txt
+
+      - name: 确定版本号
+        id: ver
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $v = "${{ github.ref_name }}"
+          } else {
+            $v = "dev-" + "${{ github.sha }}".Substring(0, 7)
+          }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "版本：$v"
+
+      - name: 安装打包依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r build-requirements.txt
+          # RapidOCR 不带依赖安装，避免装入带图形界面的完整版 OpenCV
+          python -m pip install --no-deps rapidocr_onnxruntime
+
+      - name: 打包文件夹版
+        if: inputs.mode != 'onefile'
+        env:
+          PDFBM_MODE: onedir
+        run: |
+          python -m PyInstaller --noconfirm --clean --log-level WARN --distpath dist --workpath build/onedir PdfBookmarker.spec
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if (-not (Test-Path dist/PdfBookmarker/PdfBookmarker.exe)) { throw "没有生成 PdfBookmarker.exe" }
+
+      - name: 打包单文件版
+        if: inputs.mode != 'onedir'
+        env:
+          PDFBM_MODE: onefile
+        run: |
+          $env:PDFBM_SPLASH = "1"
+          python -m PyInstaller --noconfirm --clean --log-level WARN --distpath dist --workpath build/onefile PdfBookmarker.spec
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "带启动画面打包失败，改为不带启动画面重新打包"
+            $env:PDFBM_SPLASH = "0"
+            python -m PyInstaller --noconfirm --clean --log-level WARN --distpath dist --workpath build/onefile PdfBookmarker.spec
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+          if (-not (Test-Path dist/PdfBookmarker-Portable.exe)) { throw "没有生成 PdfBookmarker-Portable.exe" }
+
+      - name: 整理打包结果
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          New-Item -ItemType Directory -Force out | Out-Null
+          if (Test-Path dist/PdfBookmarker) {
+            Compress-Archive -Path dist/PdfBookmarker -DestinationPath "out/PdfBookmarker-$v-windows-x64.zip"
+          }
+          if (Test-Path dist/PdfBookmarker-Portable.exe) {
+            Copy-Item dist/PdfBookmarker-Portable.exe "out/PdfBookmarker-$v-Portable.exe"
+          }
+          Get-ChildItem out | ForEach-Object {
+            "{0}  {1:N1} MB" -f $_.Name, ($_.Length / 1MB)
+          } | Tee-Object -Variable sizes
+          "### 打包结果`n" >> $env:GITHUB_STEP_SUMMARY
+          $sizes | ForEach-Object { "- $_" >> $env:GITHUB_STEP_SUMMARY }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PdfBookmarker-${{ steps.ver.outputs.version }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: 发布 Release
+    # 只有推送 tag 时才发布；手动运行到打包为止
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: PdfBookmarker-${{ needs.build.outputs.version }}
+          path: out
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: PDF 目录书签助手 ${{ github.ref_name }}
+          files: out/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body: |
+            ## 下载
+
+            | 文件 | 说明 |
+            | --- | --- |
+            | `PdfBookmarker-${{ github.ref_name }}-windows-x64.zip` | 文件夹版：解压后运行 `PdfBookmarker\PdfBookmarker.exe`，启动最快 |
+            | `PdfBookmarker-${{ github.ref_name }}-Portable.exe` | 单文件版：直接运行，首次启动要先解压，会慢几秒 |
+
+            两种都不需要安装 Python。使用说明见 [用户手册](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/用户手册.md)。

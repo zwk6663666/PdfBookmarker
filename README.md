@@ -31,6 +31,26 @@
 
 打包结束时脚本会显示两种结果各自的大小。
 
+### 云端打包（GitHub Actions）
+
+仓库里的 `.github/workflows/build.yml` 会在 GitHub 的 Windows 机器上打包，步骤和 `打包为exe.bat` 相同，本机不需要准备任何环境。
+
+**发布新版本**：推送一个 `v` 开头的 tag，会自动打出两种版本并发布到 Releases。tag 名里带 `-`（如 `v1.2.0-beta`）时标记为预发布。
+
+```
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+**只打包、不发布**：在 GitHub 仓库的 Actions › 打包 › Run workflow 中一键运行，可以选择打包方式（两种都打 / 只打文件夹版 / 只打单文件版）。打包结果只作为本次运行的附件（Artifacts）保存 30 天，在运行详情页下载，不会创建 Release。
+
+| 文件 | 内容 |
+| --- | --- |
+| `PdfBookmarker-<版本>-windows-x64.zip` | 文件夹版，解压后运行 `PdfBookmarker\PdfBookmarker.exe` |
+| `PdfBookmarker-<版本>-Portable.exe` | 单文件版 |
+
+手动运行时的版本号为 `dev-` 加提交号前 7 位。
+
 **macOS / Linux**
 
 在终端运行 `bash 启动.command`，或者手动执行：
